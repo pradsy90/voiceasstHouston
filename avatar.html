@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hey Julie - Avatar</title>
+    <style>
+        body { text-align: center; background-color: black; color: white; font-family: sans-serif; }
+        #face { width: 400px; margin: 50px auto; }
+        #status { margin-top: 20px; font-size: 1.2rem; color: #00FF00; }
+    </style>
+</head>
+<body>
+<h1>🎭 Julie Avatar</h1>
+<div id="face">
+    <img id="avatarImg" src="idle.jpg" width="300" onerror="console.error('❌ Failed to load avatar image.')" />
+</div>
+<div id="status">🔌 Connecting...</div>
+<div id="spokenText" style="margin-top:40px;font-size:1.1rem;color:#FFD700;"></div>
+<script>
+    const img = document.getElementById("avatarImg");
+    const statusDiv = document.getElementById("status");
+
+    function connectToWebSocket() {
+        const ws = new WebSocket('ws://localhost:8765');
+
+        ws.onopen = () => {
+            console.log("🌐 Connected to Python WebSocket server!");
+            statusDiv.innerText = "🟢 Connected to avatar!";
+        };
+
+        ws.onmessage = (event) => {
+            console.log("📡 Received message:", event.data);
+            // NEW: Show any text message
+            if (event.data.startsWith('text:')) {
+             const txt = event.data.substring(5);
+                document.getElementById('spokenText').innerText = "🗣️ " + txt;
+            } else if (event.data === 'start') {
+                img.src = "talking.gif?cacheBust=" + new Date().getTime();
+                statusDiv.innerText = "💬 Speaking...";
+            } else if (event.data === 'stop') {
+                img.src = "idle.jpg?cacheBust=" + new Date().getTime();
+                statusDiv.innerText = "🟢 Idle, connected to avatar!";
+                document.getElementById('spokenText').innerText = "";
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.error("💥 WebSocket error:", error);
+            statusDiv.innerText = "❌ WebSocket error!";
+        };
+
+        ws.onclose = () => {
+            console.warn("⚠️ WebSocket closed. Trying again in 3 seconds...");
+            setTimeout(connectToWebSocket, 3000);
+        };
+    }
+    connectToWebSocket();
+</script>
+</body>
+</html>

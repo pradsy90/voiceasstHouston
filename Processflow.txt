@@ -1,0 +1,133 @@
+FUNCTIONAL DESIGN — VERIFIED (Oct 2025)
+
+0. Overview
+    - Processes:
+        [P1] launchjulie (orchestrator in startjulie.py)
+        [P2] Streamlit chat window (basicchatwindow.py)
+        [P3] Voice recognition & Q/A (recognizevoice.py + chat.py + speech2text.py)
+        [P4] Avatar server & browser face (avatarserver.py + avatar.html)
+    - Shared state: multiprocessing.Manager().list() => glblvrbllist, Manager().dict() => glblvrbldict
+
+1. Entry Point: startjulie.py (__main__)
+    1.1 Create shared objects:
+        glblvrbllist = Manager().list()
+        glblvrbldict = Manager().dict()
+        glblvrbldict["ProcessMain"] = "Running"
+    1.2 Start Process 1:
+        p1 := multiprocessing.Process(target=launchjulie, args=(glblvrbllist, glblvrbldict)).start()
+    1.3 Heartbeat loop logs Process1..4 statuses every 20s.
+
+2. Process 1: launchjulie(glblvrbllist, glblvrbldict)
+    2.1 Boot banners:
+        Process1..4 strings initialized in glblvrbldict
+    2.2 Start [P4] Avatar server (NEW mechanism)
+        - multiprocessing.Process(target=launch_avatar_with_shared_dict, args=(glblvrbldict,)).start()
+        - Stores AvatarPID, sets Process4 status
+        - avatarserver.py:
+            - Opens avatar.html in default browser
+            - Starts WS servers:
+                ws://localhost:8765 (browser UI)
+                ws://localhost:8766 (command input)
+    2.3 Start [P3] Voice assistant
+        - multiprocessing.Process(target=callrecognize, ...).start()
+    2.4 Wait for glblvrbldict["Filename"] from [P3]
+        - Compose transcript path: ...\heyjulie\chatlogs\<Filename>.txt
+        - Create file, write header, set glblvrbldict["chattranscriptfile"]
+    2.5 Start [P2] Chat window
+        - multiprocessing.Process(target=basicchatwindowfull, ...).start()
+        - basicchatwindowfull launches:
+            streamlit run basicchatwindow.py -- --transcriptfile=<path>
+        - Stores glblvrbldict["StreamlitPID"]
+        - NOTE: fixed port 8501 (risk: conflicts)
+    2.6 Transcript writer loop (CURRENT: 30 × 15s ≈ 450s)
+        - Every 15s overwrite transcript file with glblvrbldict["transcript"]
+        - Every 60s, update Process1 note "Transcript updated"
+    2.7 Shutdown
+        - join() P2, P3, P4
+        - Attempt to terminate Streamlit via StreamlitPID
+
+3. Process 3: callrecognize() + recognizevoice.recog_kywrd()
+    3.1 Initialize session identifiers
+        - TransnCode = generate_code(); Filename = now()
+        - glblvrbldict: 'question'='', 'answer'='', 'transcript'="Transcript ID <TransnCode>\n"
+    3.2 Load config (settings.config)
+        - Masters_Name, Assistants_Name, Prompt
+        - NumQuestions (default 5 if missing)
+    3.3 Keyword recognition loop (0..NumQuestions-1)
+        3.3.1 Wait for keyword (Azure keyword model)
+            - On success: play ding.wav (async), set Process3 "Listening to Question #N"
+        3.3.2 Capture speech to text
+            - speech2text.from_mic() → Azure STT (device_name placeholder in code)
+        3.3.3 Append Q to transcript
+            - "\n\n<Master> : <spoken text>"
+        3.3.4 Get answer
+            - chat.return_answer(Prompt + <spoken text> + "</Question>")
+            - If needs live data: SerpAPI → snippets → GPT-4 summarize
+            - Else: direct GPT-4 completion
+        3.3.5 Append answer to transcript
+            - "\n\n<Assistant> : <answer>"
+        3.3.6 Send answer to avatar server (command port 8766)
+            - SINGLE message: "text:Answering question #N\n<answer>"
+            - (No explicit start/stop here)
+        3.3.7 Update shared dict
+            - glblvrbldict['question'|'answer'|'transcript']
+        3.3.8 Next question
+    3.4 End of loop → write final lines to transcript & Process3 message
+
+4. Process 4: avatarserver.py + avatar.html
+    4.1 avatarserver.py
+        - handle_avatar (8765): track connected browser WebSocket(s)
+        - handle_command (8766): receive assistant messages (start/stop/text), requires at least one browser connected
+        - For "text:..." → forward to browser, then TTS:
+            - Instantiate texttospeech.convert(texttoconvert=<message>, ws=<browser_ws>, loop=<event_loop>)
+            - Run tts.readout() in executor so server stays responsive
+        - For "start"/"stop" → forward to browser immediately (rarely needed now; TTS triggers these)
+        - (Recommended safe fallback) If command lacks "text:" and isn’t start/stop → send "text:" + command
+    4.2 texttospeech.py (sync TTS wrapped safely)
+        - Hooks Azure callbacks:
+            on synthesis_started → ws.send("start")
+            on completed/canceled → ws.send("stop")
+        - Guarantees GIF stays “talking” for the entire audio playback
+    4.3 avatar.html (browser UI)
+        - Connects to ws://localhost:8765
+        - On "start" → talking.gif; on "stop" → idle.jpg
+        - On "text:<...>" → displays the spoken text in page (gold box by default)
+        - (Optional tweak) To show text in green status instead of “Speaking…”, set statusDiv to the text in the text handler
+
+5. Process 2: basicchatwindow.py (Streamlit live transcript)
+    5.1 Reads --transcriptfile= path from argv (retries for file up to ~10s)
+    5.2 Wide layout: elapsed timer + transcript text_area
+    5.3 Every 2s: open file (utf-8→latin-1 fallback), display content, st.rerun()
+
+6. Configuration, Env, Assets
+    6.1 settings.config (required keys)
+        - Masters_Name, Assistants_Name, Prompt, NumQuestions (default 5)
+        - (Optionally add) StreamlitPort, AvatarPorts, Paths
+    6.2 Env vars
+        - OPENAI_API_KEY (OpenAI client)
+        - SERPAPI_KEY (also hardcoded fallback exists in chat.py)
+        - SPEECH_KEY, SPEECH_REGION (Azure Speech)
+    6.3 Files/Assets (paths must exist)
+        - Keyword model: C:\cutover\HeyHouston_02212023.table
+        - ding.wav (path used in recognizevoice.py)
+        - avatar assets: idle.jpg, talking.gif (same dir as avatar.html)
+        - transcript dir: ...\heyjulie\chatlogs\
+
+7. Known Behaviors & Caveats
+    7.1 Streamlit port is fixed at 8501 → may conflict if already in use
+        - Mitigation: port probe/fallback or auto-port
+    7.2 Early “Voice Recognition enabled” TTS may run before browser connects
+        - Harmless (signals skipped), or wait a second before first TTS
+    7.3 UI “Speaking…” vs actual text
+        - HTML currently shows actual text in gold box; green status shows state
+        - To show the text in green status, update avatar.html message handler
+    7.4 STT device_name is placeholder "<device id>"
+        - If not set properly, STT may use default or fail silently
+
+8. Suggested Small Improvements (non-breaking)
+    8.1 avatarserver.py fallback:
+        if not (cmd in {"start","stop"} or cmd.startswith("text:")):
+            send "text:"+cmd
+    8.2 Streamlit port fallback if 8501 busy (or choose random open port)
+    8.3 Limit transcript window to last N KB/lines for smoother UI updates
+    8.4 Optional: make NumQuestions, ports, paths configurable via settings.config
